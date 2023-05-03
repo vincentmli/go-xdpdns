@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"path"
 	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	flag "github.com/spf13/pflag"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "$BPF_CFLAGS" -cc clang bpf ./xdp_rrl_per_ip.c -- -I./headers
@@ -17,6 +17,15 @@ import (
 const (
 	bpfFSPath = "/sys/fs/bpf"
 )
+
+type Flags struct {
+	Interface string
+	Threshold uint16
+}
+
+type Cfg struct {
+	Threshold uint16
+}
 
 func startTicker(f func()) chan bool {
 	done := make(chan bool, 1)
@@ -36,13 +45,29 @@ func startTicker(f func()) chan bool {
 	return done
 }
 
+func (f *Flags) SetFlags() {
+	flag.Uint16Var(&f.Threshold, "threshold", 0, "DNS response rate limit per IP")
+	flag.StringVar(&f.Interface, "interface", "", "Interface to attach")
+}
+
+func GetConfig(flags *Flags) Cfg {
+	cfg := Cfg{}
+	if flags.Threshold > 0 {
+		cfg.Threshold = flags.Threshold
+	}
+	return cfg
+}
+
 func main() {
-	if len(os.Args) < 2 {
+	flags := Flags{}
+	flags.SetFlags()
+	flag.Parse()
+
+	if flags.Interface == "" {
 		log.Fatalf("Please specify a network interface")
 	}
-
 	// Look up the network interface by name.
-	ifaceName := os.Args[1]
+	ifaceName := flags.Interface
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		log.Fatalf("lookup network iface %q: %s", ifaceName, err)
@@ -50,17 +75,26 @@ func main() {
 
 	xdpDNSRRL := "xdp-dnsrrl"
 	pinPath := path.Join(bpfFSPath, xdpDNSRRL)
-	/*
-	   if err := os.MkdirAll(pinPath, os.ModePerm); err != nil {
-	           log.Fatalf("failed to create bpf fs subpath: %+v", err)
-	   }
-	*/
 
-	// Load pre-compiled programs into the kernel.
-	objs := bpfObjects{}
-	if err := loadBpfObjects(&objs, &ebpf.CollectionOptions{}); err != nil {
-		log.Fatalf("loading objects: %s", err)
+	var opts ebpf.CollectionOptions
+	var bpfSpec *ebpf.CollectionSpec
+	objs := &bpfObjects{}
+
+	bpfSpec, err = loadBpf()
+	if err != nil {
+		log.Fatalf("Failed to load bpf spec: %v", err)
 	}
+
+	if err := bpfSpec.RewriteConstants(map[string]interface{}{
+		"CFG": GetConfig(&flags),
+	}); err != nil {
+		log.Fatalf("Failed to rewrite config: %v", err)
+	}
+
+	if err := bpfSpec.LoadAndAssign(objs, &opts); err != nil {
+		log.Fatalf("Failed to load objects: %v", err)
+	}
+	defer objs.Close()
 
 	// Attach the program.
 	l, err := link.AttachXDP(link.XDPOptions{
@@ -77,15 +111,5 @@ func main() {
 	//	defer l.Close()
 
 	log.Printf("Attached XDP program to iface %q (index %d)", iface.Name, iface.Index)
-	/*
-		log.Printf("Press Ctrl-C to exit and remove the program")
-
-		done := startTicker(func() {
-			fmt.Println("tick...")
-		})
-		time.Sleep(120 * time.Second)
-		close(done)
-		time.Sleep(5 * time.Second)
-	*/
 
 }

@@ -33,7 +33,14 @@ typedef __u64 uint64_t;
 #define FRAME_SIZE	  1000000000
 
 // QPS before RRL hits in
-#define THRESHOLD	  10
+
+struct config {
+        uint16_t threshold;
+} __attribute__((packed));
+
+static volatile const struct config CFG;
+#define cfg (&CFG)
+
 /*
  *  End defines
  */
@@ -200,7 +207,7 @@ int do_rate_limit(struct udphdr *udp, struct dnshdr *dns, struct bucket *b)
 	}
 
 	// less QPS than the threshold? Then pass.
-	if (b->n_packets < THRESHOLD)
+	if (b->n_packets < cfg->threshold)
 		return 1;
 
 	// save the old header values for checksum update later on
