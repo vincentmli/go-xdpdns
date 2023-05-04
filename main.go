@@ -1,11 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"path"
-	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -27,26 +25,8 @@ type Cfg struct {
 	Threshold uint16
 }
 
-func startTicker(f func()) chan bool {
-	done := make(chan bool, 1)
-	go func() {
-		ticker := time.NewTicker(time.Second * 1)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				f()
-			case <-done:
-				fmt.Println("done")
-				return
-			}
-		}
-	}()
-	return done
-}
-
 func (f *Flags) SetFlags() {
-	flag.Uint16Var(&f.Threshold, "threshold", 0, "DNS response rate limit per IP")
+	flag.Uint16Var(&f.Threshold, "threshold", 10, "DNS response rate limit per IP")
 	flag.StringVar(&f.Interface, "interface", "", "Interface to attach")
 }
 
