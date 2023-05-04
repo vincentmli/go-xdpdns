@@ -12,7 +12,7 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "$BPF_CFLAGS" -cc clang bpf ./xdp_rrl_per_ip.c -- -I./headers
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-strip -cflags "$BPF_CFLAGS" -cc clang bpf ./xdp_rrl_per_ip.c -- -I./headers
 
 const (
 	bpfFSPath = "/sys/fs/bpf"
