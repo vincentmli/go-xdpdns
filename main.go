@@ -10,30 +10,35 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-strip -cflags "$BPF_CFLAGS" -cc clang bpf ./xdp_rrl_per_ip.c -- -I./headers
-
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-strip -cflags "$BPF_CFLAGS" -cc clang bpf ./xdp_rrl.c -- -I./headers
 const (
 	bpfFSPath = "/sys/fs/bpf"
 )
 
 type Flags struct {
 	Interface string
-	Threshold uint16
+	Ratelimit uint16
+	Numcpus   uint8
 }
 
 type Cfg struct {
-	Threshold uint16
+	Ratelimit uint16
+	Numcpus   uint8
 }
 
 func (f *Flags) SetFlags() {
-	flag.Uint16Var(&f.Threshold, "threshold", 10, "DNS response rate limit per IP")
+	flag.Uint16Var(&f.Ratelimit, "ratelimit", 20, "DNS response rate limit per IP")
+	flag.Uint8Var(&f.Numcpus, "numcpus", 2, "DNS response rate limit per IP")
 	flag.StringVar(&f.Interface, "interface", "", "Interface to attach")
 }
 
 func GetConfig(flags *Flags) Cfg {
 	cfg := Cfg{}
-	if flags.Threshold > 0 {
-		cfg.Threshold = flags.Threshold
+	if flags.Ratelimit > 0 {
+		cfg.Ratelimit = flags.Ratelimit
+	}
+	if flags.Numcpus > 0 {
+		cfg.Numcpus = flags.Numcpus
 	}
 	return cfg
 }
@@ -78,7 +83,7 @@ func main() {
 
 	// Attach the program.
 	l, err := link.AttachXDP(link.XDPOptions{
-		Program:   objs.XdpRrlPerIp,
+		Program:   objs.XdpRrl,
 		Interface: iface.Index,
 	})
 	if err != nil {
