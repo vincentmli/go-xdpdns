@@ -276,8 +276,8 @@ struct bpf_map_def SEC("maps") exclude_v6_prefixes = {
 
 struct ipv4_key {
 	struct   bpf_lpm_trie_key lpm_key;
-	uint32_t ipv4;
-} __attribute__((packed));
+	uint8_t  ipv4[4];
+};
 
 struct {
 	__uint(type,  BPF_MAP_TYPE_LPM_TRIE);
@@ -543,13 +543,14 @@ udp_dns_reply_v4(struct cursor *c, uint32_t key)
 		return XDP_PASS;
 
 	// search for the prefix in the LPM trie
-	struct {
-		uint32_t prefixlen;
-		uint32_t ipv4_addr;
-	} key4 = {
-		.prefixlen = 32,
-		.ipv4_addr = key
-	};
+
+	struct ipv4_key key4;
+	key4.lpm_key.prefixlen = 32;
+	key4.ipv4[0]   = key & 0xff;
+	key4.ipv4[1]   = (key >> 8) & 0xff;
+	key4.ipv4[2]   = (key >> 16) & 0xff;
+	key4.ipv4[3]   = (key >> 24) & 0xff;
+
 	uint64_t *count = bpf_map_lookup_elem(&exclude_v4_prefixes, &key4);
 
 	// if the prefix matches, we exclude it from rate limiting

@@ -4,7 +4,9 @@ import (
 	"log"
 	"net"
 	"path"
+	"strings"
 
+	"github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	flag "github.com/spf13/pflag"
@@ -14,6 +16,23 @@ import (
 const (
 	bpfFSPath = "/sys/fs/bpf"
 )
+
+type ExcludeIP4Key4 struct {
+	PrefixLen uint32
+	ExcludeIP types.IPv4
+}
+
+func NewExcludeIP4Key4(excludeIP net.IP, excludeMask net.IPMask) ExcludeIP4Key4 {
+
+	key := ExcludeIP4Key4{}
+
+	ones, _ := excludeMask.Size()
+	copy(key.ExcludeIP[:], excludeIP.To4())
+	//key.PrefixLen = PolicyStaticPrefixBits + uint32(ones) this is broken to cause invalid argument
+	key.PrefixLen = uint32(ones)
+
+	return key
+}
 
 type Flags struct {
 	Interface string
@@ -79,6 +98,41 @@ func main() {
 	if err := bpfSpec.LoadAndAssign(objs, &opts); err != nil {
 		log.Fatalf("Failed to load objects: %v", err)
 	}
+
+	var keySlice []ExcludeIP4Key4
+	var valueSlice []uint64
+
+	excludeIPs := []string{"10.11.1.0/24", "127.0.0.1/32"}
+
+	for _, ip := range excludeIPs {
+
+		if !strings.Contains(ip, "/") {
+
+			ip += "/32"
+
+		}
+		//_, ipnet, err := net.ParseCIDR(ip)
+		srcIP, ipnet, err := net.ParseCIDR(ip)
+
+		if err != nil {
+			log.Printf("malformed ip %v \n", err)
+			continue
+		}
+
+		// populate key and value slices for BatchUpdate, initilize value to 0
+		key4 := NewExcludeIP4Key4(srcIP, ipnet.Mask)
+		keySlice = append(keySlice, key4)
+		valueSlice = append(valueSlice, uint64(0))
+	}
+
+	count, err := objs.ExcludeV4Prefixes.BatchUpdate(keySlice, valueSlice, nil)
+	if err != nil {
+		log.Fatalf("BatchUpdate: %v", err)
+	}
+	if count != len(keySlice) {
+		log.Fatalf("BatchUpdate: expected count, %d, to be %d", count, len(keySlice))
+	}
+
 	defer objs.Close()
 
 	// Attach the program.
