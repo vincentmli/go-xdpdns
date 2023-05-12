@@ -284,7 +284,7 @@ struct {
 	__type(key,   struct ipv4_key);
 	__type(value, uint64_t);
 	__uint(max_entries, 10000);
-//	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } exclude_v4_prefixes __section(".maps");
 
@@ -298,7 +298,7 @@ struct {
 	__type(key,   struct ipv6_key);
 	__type(value, uint64_t);
 	__uint(max_entries, 10000);
-//        __uint(pinning, LIBBPF_PIN_BY_NAME);
+        __uint(pinning, LIBBPF_PIN_BY_NAME);
         __uint(map_flags, BPF_F_NO_PREALLOC);
 } exclude_v6_prefixes __section(".maps");
 

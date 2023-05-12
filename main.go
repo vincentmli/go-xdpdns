@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net"
+	"os"
 	"path"
 	"strings"
 
@@ -80,7 +81,22 @@ func main() {
 	xdpDNSRRL := "xdp-dnsrrl"
 	pinPath := path.Join(bpfFSPath, xdpDNSRRL)
 
-	var opts ebpf.CollectionOptions
+	xdpProg := "DNSProgRRL"
+	xdpProgPath := path.Join(pinPath, xdpProg)
+
+	if err := os.MkdirAll(pinPath, os.ModePerm); err != nil {
+		log.Fatalf("failed to create bpf fs subpath: %+v", err)
+	}
+
+	opts := ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{
+			// Pin the map to the BPF filesystem and configure the
+			// library to automatically re-write it in the BPF
+			// program so it can be re-used if it already exists or
+			// create it if not
+			PinPath: pinPath,
+		},
+	}
 	var bpfSpec *ebpf.CollectionSpec
 	objs := &bpfObjects{}
 
@@ -143,7 +159,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("could not attach XDP program: %s", err)
 	}
-	err = l.Pin(pinPath)
+	err = l.Pin(xdpProgPath)
 	if err != nil {
 		log.Fatalf("could not pin XDP program: %s", err)
 	}
