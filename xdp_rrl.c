@@ -1,50 +1,3 @@
-/*
- * DNS Response Rate Limiting module in XDP.
- *
- * October 2020 - Tom Carpay & Willem Toorop
- */
-
-#define RRL_N_CPUS            2
-/* This should be the number of CPUs on your system. Get it by running:
- *
- * 	echo "CPUs: $(grep -c processor /proc/cpuinfo)"
- */
-
-#define RRL_SIZE        1000000
-/* This option gives the size of the hashtable. More buckets
- * use more memory, and reduce the chance of hash collisions.
- */
-
-#define RRL_IPv4_PREFIX_LEN  24
-/* IPv4 prefix length. Addresses are grouped by netblock.
- */
-
-#define RRL_IPv6_PREFIX_LEN  48
-/* IPv6 prefix length. Addresses are grouped by netblock.
- */
-
-#define RRL_RATELIMIT       200
-/* The max qps allowed (from one query source). If set to 0 then it is disabled
- * (unlimited rate). Once the rate limit is reached, responses will be dropped.
- * However, one in every RRL_SLIP number of responses is allowed, with the TC
- * bit set. If slip is set to 2, the outgoing response rate will be halved. If
- * it's set to 3, the outgoing response rate will be one-third, and so on.  If
- * you set RRL_SLIP to 10, traffic is reduced to 1/10th.
- */
-
-#define RRL_SLIP              2
-/* This option controls the number of packets discarded before we send back a
- * SLIP response (a response with "truncated" bit set to one). 0 disables the
- * sending of SLIP packets, 1 means every query will get a SLIP response.
- * Default is 2, cuts traffic in half and legit users have a fair chance to get
- * a +TC response.
- */
-
-
-/* #define COMPILE_FOR_OLD_LIBBPF */
-/* uncomment the above to compile for old versions of libbpf */
-
-
 #include <linux/bpf.h>
 #include <linux/if_ether.h> /* for struct ethhdr   */
 #include <linux/ip.h>       /* for struct iphdr    */
@@ -62,188 +15,26 @@ typedef __u32 uint32_t;
 typedef __u64 uint64_t;
 #define memcpy __builtin_memcpy
 
-#define DNS_PORT             53
+#define DNS_PORT      53
 
-//#define THRESHOLD ((RRL_RATELIMIT) / (RRL_N_CPUS))
-#define FRAME_SIZE   1000000000
+#define FRAME_SIZE	  1000000000
+#define THRESHOLD	  2
 
 struct config {
         uint16_t ratelimit;
-	uint8_t numcpus;
+        uint8_t numcpus;
 } __attribute__((packed));
 
 static volatile const struct config CFG;
 #define cfg (&CFG)
 
-
-#define RRL_MASK_CONCAT1(X)  RRL_MASK ## X
-#define RRL_MASK_CONCAT2(X)  RRL_MASK_CONCAT1(X)
-#define RRL_IPv4_MASK        RRL_MASK_CONCAT2(RRL_IPv4_PREFIX_LEN)
-#define RRL_IPv6_MASK        RRL_MASK_CONCAT2(RRL_IPv6_PREFIX_LEN)
-
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-#define RRL_MASK1            0x00000080
-#define RRL_MASK2            0x000000C0
-#define RRL_MASK3            0x000000E0
-#define RRL_MASK4            0x000000F0
-#define RRL_MASK5            0x000000F8
-#define RRL_MASK6            0x000000FC
-#define RRL_MASK7            0x000000FE
-#define RRL_MASK8            0x000000FF
-#define RRL_MASK9            0x000080FF
-#define RRL_MASK10           0x0000C0FF
-#define RRL_MASK11           0x0000E0FF
-#define RRL_MASK12           0x0000F0FF
-#define RRL_MASK13           0x0000F8FF
-#define RRL_MASK14           0x0000FCFF
-#define RRL_MASK15           0x0000FEFF
-#define RRL_MASK16           0x0000FFFF
-#define RRL_MASK17           0x0080FFFF
-#define RRL_MASK18           0x00C0FFFF
-#define RRL_MASK19           0x00E0FFFF
-#define RRL_MASK20           0x00F0FFFF
-#define RRL_MASK21           0x00F8FFFF
-#define RRL_MASK22           0x00FCFFFF
-#define RRL_MASK23           0x00FEFFFF
-#define RRL_MASK24           0x00FFFFFF
-#define RRL_MASK25           0x80FFFFFF
-#define RRL_MASK26           0xC0FFFFFF
-#define RRL_MASK27           0xE0FFFFFF
-#define RRL_MASK28           0xF0FFFFFF
-#define RRL_MASK29           0xF8FFFFFF
-#define RRL_MASK30           0xFCFFFFFF
-#define RRL_MASK31           0xFEFFFFFF
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#define RRL_MASK1            0x80000000
-#define RRL_MASK2            0xC0000000
-#define RRL_MASK3            0xE0000000
-#define RRL_MASK4            0xF0000000
-#define RRL_MASK5            0xF8000000
-#define RRL_MASK6            0xFC000000
-#define RRL_MASK7            0xFE000000
-#define RRL_MASK8            0xFF000000
-#define RRL_MASK9            0xFF800000
-#define RRL_MASK10           0xFFC00000
-#define RRL_MASK11           0xFFE00000
-#define RRL_MASK12           0xFFF00000
-#define RRL_MASK13           0xFFF80000
-#define RRL_MASK14           0xFFFC0000
-#define RRL_MASK15           0xFFFE0000
-#define RRL_MASK16           0xFFFF0000
-#define RRL_MASK17           0xFFFF8000
-#define RRL_MASK18           0xFFFFC000
-#define RRL_MASK19           0xFFFFE000
-#define RRL_MASK20           0xFFFFF000
-#define RRL_MASK21           0xFFFFF800
-#define RRL_MASK22           0xFFFFFC00
-#define RRL_MASK23           0xFFFFFE00
-#define RRL_MASK24           0xFFFFFF00
-#define RRL_MASK25           0xFFFFFF80
-#define RRL_MASK26           0xFFFFFFC0
-#define RRL_MASK27           0xFFFFFFE0
-#define RRL_MASK28           0xFFFFFFF0
-#define RRL_MASK29           0xFFFFFFF8
-#define RRL_MASK30           0xFFFFFFFC
-#define RRL_MASK31           0xFFFFFFFE
-#else
-# error "Fix your compiler's __BYTE_ORDER__?!"
-#endif
-
-#define RRL_MASK33           RRL_MASK1
-#define RRL_MASK34           RRL_MASK2
-#define RRL_MASK35           RRL_MASK3
-#define RRL_MASK36           RRL_MASK4
-#define RRL_MASK37           RRL_MASK5
-#define RRL_MASK38           RRL_MASK6
-#define RRL_MASK39           RRL_MASK7
-#define RRL_MASK40           RRL_MASK8
-#define RRL_MASK41           RRL_MASK9
-#define RRL_MASK42           RRL_MASK10
-#define RRL_MASK43           RRL_MASK11
-#define RRL_MASK44           RRL_MASK12
-#define RRL_MASK45           RRL_MASK13
-#define RRL_MASK46           RRL_MASK14
-#define RRL_MASK47           RRL_MASK15
-#define RRL_MASK48           RRL_MASK16
-#define RRL_MASK49           RRL_MASK17
-#define RRL_MASK50           RRL_MASK18
-#define RRL_MASK51           RRL_MASK19
-#define RRL_MASK52           RRL_MASK20
-#define RRL_MASK53           RRL_MASK21
-#define RRL_MASK54           RRL_MASK22
-#define RRL_MASK55           RRL_MASK23
-#define RRL_MASK56           RRL_MASK24
-#define RRL_MASK57           RRL_MASK25
-#define RRL_MASK58           RRL_MASK26
-#define RRL_MASK59           RRL_MASK27
-#define RRL_MASK60           RRL_MASK28
-#define RRL_MASK61           RRL_MASK29
-#define RRL_MASK62           RRL_MASK30
-#define RRL_MASK63           RRL_MASK31
-
-#define RRL_MASK65           RRL_MASK1
-#define RRL_MASK66           RRL_MASK2
-#define RRL_MASK67           RRL_MASK3
-#define RRL_MASK68           RRL_MASK4
-#define RRL_MASK69           RRL_MASK5
-#define RRL_MASK70           RRL_MASK6
-#define RRL_MASK71           RRL_MASK7
-#define RRL_MASK72           RRL_MASK8
-#define RRL_MASK73           RRL_MASK9
-#define RRL_MASK74           RRL_MASK10
-#define RRL_MASK75           RRL_MASK11
-#define RRL_MASK76           RRL_MASK12
-#define RRL_MASK77           RRL_MASK13
-#define RRL_MASK78           RRL_MASK14
-#define RRL_MASK79           RRL_MASK15
-#define RRL_MASK80           RRL_MASK16
-#define RRL_MASK81           RRL_MASK17
-#define RRL_MASK82           RRL_MASK18
-#define RRL_MASK83           RRL_MASK19
-#define RRL_MASK84           RRL_MASK20
-#define RRL_MASK85           RRL_MASK21
-#define RRL_MASK86           RRL_MASK22
-#define RRL_MASK87           RRL_MASK23
-#define RRL_MASK88           RRL_MASK24
-#define RRL_MASK89           RRL_MASK25
-#define RRL_MASK90           RRL_MASK26
-#define RRL_MASK91           RRL_MASK27
-#define RRL_MASK92           RRL_MASK28
-#define RRL_MASK93           RRL_MASK29
-#define RRL_MASK94           RRL_MASK30
-#define RRL_MASK95           RRL_MASK31
-
-#define RRL_MASK97           RRL_MASK1
-#define RRL_MASK98           RRL_MASK2
-#define RRL_MASK99           RRL_MASK3
-#define RRL_MASK100          RRL_MASK4
-#define RRL_MASK101          RRL_MASK5
-#define RRL_MASK102          RRL_MASK6
-#define RRL_MASK103          RRL_MASK7
-#define RRL_MASK104          RRL_MASK8
-#define RRL_MASK105          RRL_MASK9
-#define RRL_MASK106          RRL_MASK10
-#define RRL_MASK107          RRL_MASK11
-#define RRL_MASK108          RRL_MASK12
-#define RRL_MASK109          RRL_MASK13
-#define RRL_MASK110          RRL_MASK14
-#define RRL_MASK111          RRL_MASK15
-#define RRL_MASK112          RRL_MASK16
-#define RRL_MASK113          RRL_MASK17
-#define RRL_MASK114          RRL_MASK18
-#define RRL_MASK115          RRL_MASK19
-#define RRL_MASK116          RRL_MASK20
-#define RRL_MASK117          RRL_MASK21
-#define RRL_MASK118          RRL_MASK22
-#define RRL_MASK119          RRL_MASK23
-#define RRL_MASK120          RRL_MASK24
-#define RRL_MASK121          RRL_MASK25
-#define RRL_MASK122          RRL_MASK26
-#define RRL_MASK123          RRL_MASK27
-#define RRL_MASK124          RRL_MASK28
-#define RRL_MASK125          RRL_MASK29
-#define RRL_MASK126          RRL_MASK30
-#define RRL_MASK127          RRL_MASK31
+/*
+ *  Store the time frame
+ */
+struct bucket {
+	uint64_t start_time;
+	uint64_t n_packets;
+};
 
 #ifndef __section
 # define __section(NAME) __attribute__((section(NAME), used))
@@ -254,25 +45,6 @@ static volatile const struct config CFG;
 #ifndef __type
 #define __type(name, val) typeof(val) *(name)
 #endif
-
-
-#ifdef COMPILE_FOR_OLD_LIBBPF
-
-struct bpf_map_def SEC("maps") exclude_v4_prefixes = {
-	.type = BPF_MAP_TYPE_LPM_TRIE,
-	.key_size = sizeof(struct bpf_lpm_trie_key) + sizeof(uint32_t),
-	.value_size = sizeof(uint64_t),
-	.max_entries = 10000
-};
-
-struct bpf_map_def SEC("maps") exclude_v6_prefixes = {
-	.type = BPF_MAP_TYPE_LPM_TRIE,
-	.key_size = sizeof(struct bpf_lpm_trie_key) + 8, // first 64 bits
-	.value_size = sizeof(uint64_t),
-	.max_entries = 10000
-};
-
-#else /* #ifdef COMPILE_FOR_OLD_LIBBPF */
 
 struct ipv4_key {
 	struct   bpf_lpm_trie_key lpm_key;
@@ -302,54 +74,19 @@ struct {
         __uint(map_flags, BPF_F_NO_PREALLOC);
 } exclude_v6_prefixes __section(".maps");
 
-#endif /* #else #ifdef COMPILE_FOR_OLD_LIBBPF */
-
-SEC("xdp-rrl")
-#if RRL_RATELIMIT == 0
-int xdp_rrl(struct xdp_md *ctx)
-{
-	(void)ctx;
-	return XDP_PASS;
-}
-#else
-
-/*
- *  Store the time frame
- */
-struct bucket {
-	uint64_t start_time;
-	uint64_t n_packets;
-};
-
-#ifdef COMPILE_FOR_OLD_LIBBPF
-struct bpf_map_def SEC("maps") state_map = {
-	.type = BPF_MAP_TYPE_PERCPU_HASH,
-	.key_size = sizeof(uint32_t),
-	.value_size = sizeof(struct bucket),
-	.max_entries = RRL_SIZE
-};
-
-struct bpf_map_def SEC("maps") state_map_v6 = {
-	.type = BPF_MAP_TYPE_PERCPU_HASH,
-	.key_size = sizeof(struct in6_addr),
-	.value_size = sizeof(struct bucket),
-	.max_entries = RRL_SIZE
-};
-#else /* #ifdef COMPILE_FOR_OLD_LIBBPF */
 struct {
 	__uint(type,  BPF_MAP_TYPE_PERCPU_HASH);
 	__type(key,   uint32_t);
 	__type(value, struct bucket);
-	__uint(max_entries, RRL_SIZE);
+	__uint(max_entries, 1000000);
 } state_map __section(".maps");
 
 struct {
 	__uint(type,  BPF_MAP_TYPE_PERCPU_HASH);
 	__type(key,   sizeof(struct in6_addr));
 	__type(value, struct bucket);
-	__uint(max_entries, RRL_SIZE);
+	__uint(max_entries, 1000000);
 } state_map_v6 __section(".maps");
-#endif /* #else #ifdef COMPILE_FOR_OLD_LIBBPF */
 
 /** Copied from the kernel module of the base03-map-counter example of the
  ** XDP Hands-On Tutorial (see https://github.com/xdp-project/xdp-tutorial )
@@ -482,8 +219,8 @@ void update_checksum(uint16_t *csum, uint16_t old_val, uint16_t new_val)
 	*csum = (uint16_t)~new_csum_comp;
 }
 
-static __always_inline enum xdp_action
-do_rate_limit(struct udphdr *udp, struct dnshdr *dns, struct bucket *b)
+static __always_inline
+int do_rate_limit(struct udphdr *udp, struct dnshdr *dns, struct bucket *b)
 {
 	// increment number of packets
 	b->n_packets++;
@@ -500,16 +237,10 @@ do_rate_limit(struct udphdr *udp, struct dnshdr *dns, struct bucket *b)
 		b->n_packets = 0;
 	}
 
+	//if (b->n_packets < THRESHOLD)
 	if (b->n_packets < (cfg->ratelimit / cfg->numcpus))
-		return XDP_PASS;
+		return 1;
 
-#if  RRL_SLIP == 0
-	return XDP_DROP;
-#else
-# if RRL_SLIP >  1
-	if (b->n_packets % RRL_SLIP)
-		return XDP_DROP;
-# endif
 	//bpf_printk("bounce\n");
 	//save the old header values
 	uint16_t old_val = dns->flags.as_value;
@@ -527,12 +258,17 @@ do_rate_limit(struct udphdr *udp, struct dnshdr *dns, struct bucket *b)
 	update_checksum(&udp->check, old_val, dns->flags.as_value);
 
 	// bounce
-	return XDP_TX;
-#endif
+	return 0;
 }
 
-static __always_inline enum xdp_action
-udp_dns_reply_v4(struct cursor *c, uint32_t key)
+/*
+ * Parse DNS ipv4 message
+ * Returns 1 if message needs to go through (i.e. pass)
+ *        -1 if something went wrong and the packet needs to be dropped
+ *         0 if (modified) message needs to be replied
+ */
+static __always_inline
+int udp_dns_reply_v4(struct cursor *c, uint32_t key)
 {
 	struct udphdr  *udp;
 	struct dnshdr  *dns;
@@ -540,10 +276,9 @@ udp_dns_reply_v4(struct cursor *c, uint32_t key)
 	// check that we have a DNS packet
 	if (!(udp = parse_udphdr(c)) || udp->dest != __bpf_htons(DNS_PORT)
 	||  !(dns = parse_dnshdr(c)))
-		return XDP_PASS;
+		return 1;
 
 	// search for the prefix in the LPM trie
-
 	struct ipv4_key key4;
 	key4.lpm_key.prefixlen = 32;
 	key4.ipv4[0]   = key & 0xff;
@@ -556,16 +291,10 @@ udp_dns_reply_v4(struct cursor *c, uint32_t key)
 	// if the prefix matches, we exclude it from rate limiting
 	if (count) {
 		lock_xadd(count, 1);
-		return XDP_PASS;
+		return 1; // XDP_PASS
 	}
 
 	// get the rrl bucket from the map by IPv4 address
-#if   RRL_IPv4_PREFIX_LEN == 32
-#elif RRL_IPv4_PREFIX_LEN ==  0
-	key =  0;
-#else
-	key &= RRL_IPv4_MASK;
-#endif
 	struct bucket *b = bpf_map_lookup_elem(&state_map, &key);
 
 	// did we see this IPv4 address before?
@@ -579,11 +308,17 @@ udp_dns_reply_v4(struct cursor *c, uint32_t key)
 
 	// store the bucket and pass the packet
 	bpf_map_update_elem(&state_map, &key, &new_bucket, BPF_ANY);
-	return XDP_PASS;
+	return 1; // XDP_PASS
 }
 
-static __always_inline enum xdp_action
-udp_dns_reply_v6(struct cursor *c, struct in6_addr *key)
+/*
+ * Parse DNS mesage.
+ * Returns 1 if message needs to go through (i.e. pass)
+ *        -1 if something went wrong and the packet needs to be dropped
+ *         0 if (modified) message needs to be replied
+ */
+static __always_inline
+int udp_dns_reply_v6(struct cursor *c, struct in6_addr *key)
 {
  	struct udphdr  *udp;
  	struct dnshdr  *dns;
@@ -591,7 +326,7 @@ udp_dns_reply_v6(struct cursor *c, struct in6_addr *key)
  	// check that we have a DNS packet
  	if (!(udp = parse_udphdr(c)) || udp->dest != __bpf_htons(DNS_PORT)
  	||  !(dns = parse_dnshdr(c)))
- 		return XDP_PASS;
+ 		return 1;
 
 	// search for the prefix in the LPM trie
 	struct {
@@ -606,33 +341,10 @@ udp_dns_reply_v6(struct cursor *c, struct in6_addr *key)
 	// if the prefix is matches, we exclude it from rate limiting
 	if (count) {
 		lock_xadd(count, 1);
-		return XDP_PASS;
+		return 1; // XDP_PASS
 	}
  	// get the rrl bucket from the map by IPv6 address
-#if     RRL_IPv6_PREFIX_LEN == 128
-#elif   RRL_IPv6_PREFIX_LEN >   96
-	key6.ipv6_addr.in6_u.u6_addr32[3] &= RRL_IPv6_MASK;
-#else
-	key6.ipv6_addr.in6_u.u6_addr32[3] = 0;
-# if    RRL_IPv6_PREFIX_LEN ==  96
-# elif  RRL_IPv6_PREFIX_LEN >   64
-	key6.ipv6_addr.in6_u.u6_addr32[2] &= RRL_IPv6_MASK;
-# else
-	key6.ipv6_addr.in6_u.u6_addr32[2] = 0;
-#  if   RRL_IPv6_PREFIX_LEN ==  64
-#  elif RRL_IPv6_PREFIX_LEN >   32
-	key6.ipv6_addr.in6_u.u6_addr32[1] &= RRL_IPv6_MASK;
-#  else
-	key6.ipv6_addr.in6_u.u6_addr32[1] = 0;
-#   if  RRL_IPv6_PREFIX_LEN ==   0
-	key6.ipv6_addr.in6_u.u6_addr32[0] = 0;
-#   elif RRL_IPv6_PREFIX_LEN <  32
-	key6.ipv6_addr.in6_u.u6_addr32[0] &= RRL_IPv6_MASK;
-#   endif
-#  endif
-# endif
-#endif
- 	struct bucket *b = bpf_map_lookup_elem(&state_map_v6, &key6.ipv6_addr);
+ 	struct bucket *b = bpf_map_lookup_elem(&state_map_v6, key);
 
  	// did we see this IPv6 address before?
 	if (b)
@@ -644,46 +356,60 @@ udp_dns_reply_v6(struct cursor *c, struct in6_addr *key)
 	new_bucket.n_packets = 0;
 
 	// store the bucket and pass the packet
-	bpf_map_update_elem(&state_map_v6, &key6.ipv6_addr, &new_bucket, BPF_ANY);
-	return XDP_PASS;
+	bpf_map_update_elem(&state_map_v6, key, &new_bucket, BPF_ANY);
+	return 1;
 }
 
 
+/*
+ *  Recieve and parse request
+ *  @var struct xdp_md
+ */
 SEC("xdp-rrl")
 int xdp_rrl(struct xdp_md *ctx)
 {
+	// store variables
 	struct cursor   c;
 	struct ethhdr  *eth;
 	uint16_t        eth_proto;
 	struct iphdr   *ipv4;
 	struct ipv6hdr *ipv6;
-	enum xdp_action r = XDP_PASS;
+	int            r = 0;
 
+	// initialise the cursor
 	cursor_init(&c, ctx);
 	if (!(eth = parse_eth(&c, &eth_proto)))
 		return XDP_PASS;
 
-	if (eth_proto == __bpf_htons(ETH_P_IP)) {
+	// differentiate the parsing of the IP header based on the version
+	if (eth_proto == __bpf_htons(ETH_P_IP))
+	{
 		if (!(ipv4 = parse_iphdr(&c))
 		||    ipv4->protocol != IPPROTO_UDP
-		||   (r = udp_dns_reply_v4(&c, ipv4->saddr)) != XDP_TX)
-			return r;
+		||   (r = udp_dns_reply_v4(&c, ipv4->saddr))) {
+			return r < 0 ? XDP_ABORTED : XDP_PASS;
+		}
 
 		uint32_t swap_ipv4 = ipv4->daddr;
 		ipv4->daddr = ipv4->saddr;
 		ipv4->saddr = swap_ipv4;
 
-	} else if (eth_proto == __bpf_htons(ETH_P_IPV6)) {
+	}
+	else if (eth_proto == __bpf_htons(ETH_P_IPV6))
+	{
 		if (!(ipv6 = parse_ipv6hdr(&c))
 		||    ipv6->nexthdr  != IPPROTO_UDP
-		||   (r = udp_dns_reply_v6(&c, &ipv6->saddr)) != XDP_TX)
-			return r;
+		||   (r = udp_dns_reply_v6(&c, &ipv6->saddr)))
+			return r < 0 ? XDP_ABORTED : XDP_PASS;
 
 		struct in6_addr swap_ipv6 = ipv6->daddr;
 		ipv6->daddr = ipv6->saddr;
 		ipv6->saddr = swap_ipv6;
-	} else
+	}
+	else
+	{
 		return XDP_PASS;
+	}
 
 	uint8_t swap_eth[ETH_ALEN];
 	memcpy(swap_eth, eth->h_dest, ETH_ALEN);
@@ -693,6 +419,5 @@ int xdp_rrl(struct xdp_md *ctx)
 	// bounce the request
 	return XDP_TX;
 }
-#endif /* #if RRL_RATELIMIT == 0 */
 
 char __license[] SEC("license") = "GPL";
