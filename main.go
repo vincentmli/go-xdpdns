@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"log"
 	"net"
 	"os"
@@ -37,6 +38,7 @@ func NewExcludeIP4Key4(excludeIP net.IP, excludeMask net.IPMask) ExcludeIP4Key4 
 
 type Flags struct {
 	Interface string
+	Import    string
 	Ratelimit uint16
 	Numcpus   uint8
 }
@@ -50,6 +52,7 @@ func (f *Flags) SetFlags() {
 	flag.Uint16Var(&f.Ratelimit, "ratelimit", 20, "DNS response rate limit per IP")
 	flag.Uint8Var(&f.Numcpus, "numcpus", 2, "DNS response rate limit per IP")
 	flag.StringVar(&f.Interface, "interface", "", "Interface to attach")
+	flag.StringVar(&f.Import, "import", "", "excluded ipv4 prefix file")
 }
 
 func GetConfig(flags *Flags) Cfg {
@@ -61,6 +64,23 @@ func GetConfig(flags *Flags) Cfg {
 		cfg.Numcpus = flags.Numcpus
 	}
 	return cfg
+}
+
+// readLines reads a whole file into memory
+// and returns a slice of its lines.
+func readLines(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	return lines, scanner.Err()
 }
 
 func main() {
@@ -118,35 +138,41 @@ func main() {
 	var keySlice []ExcludeIP4Key4
 	var valueSlice []uint64
 
-	excludeIPs := []string{"10.11.1.0/24", "127.0.0.1/32"}
-
-	for _, ip := range excludeIPs {
-
-		if !strings.Contains(ip, "/") {
-
-			ip += "/32"
-
-		}
-		//_, ipnet, err := net.ParseCIDR(ip)
-		srcIP, ipnet, err := net.ParseCIDR(ip)
-
+	if flags.Import != "" {
+		ipv4PrefixFileName := flags.Import
+		excludeIPs, err := readLines(ipv4PrefixFileName)
 		if err != nil {
-			log.Printf("malformed ip %v \n", err)
-			continue
+			log.Fatalf("readLines: %s", err)
+		}
+		for _, ip := range excludeIPs {
+
+			if !strings.Contains(ip, "/") {
+
+				ip += "/32"
+
+			}
+			//_, ipnet, err := net.ParseCIDR(ip)
+			srcIP, ipnet, err := net.ParseCIDR(ip)
+
+			if err != nil {
+				log.Printf("malformed ip %v \n", err)
+				continue
+			}
+
+			// populate key and value slices for BatchUpdate, initilize value to 0
+			key4 := NewExcludeIP4Key4(srcIP, ipnet.Mask)
+			keySlice = append(keySlice, key4)
+			valueSlice = append(valueSlice, uint64(0))
 		}
 
-		// populate key and value slices for BatchUpdate, initilize value to 0
-		key4 := NewExcludeIP4Key4(srcIP, ipnet.Mask)
-		keySlice = append(keySlice, key4)
-		valueSlice = append(valueSlice, uint64(0))
-	}
+		count, err := objs.ExcludeV4Prefixes.BatchUpdate(keySlice, valueSlice, nil)
+		if err != nil {
+			log.Fatalf("BatchUpdate: %v", err)
+		}
+		if count != len(keySlice) {
+			log.Fatalf("BatchUpdate: expected count, %d, to be %d", count, len(keySlice))
+		}
 
-	count, err := objs.ExcludeV4Prefixes.BatchUpdate(keySlice, valueSlice, nil)
-	if err != nil {
-		log.Fatalf("BatchUpdate: %v", err)
-	}
-	if count != len(keySlice) {
-		log.Fatalf("BatchUpdate: expected count, %d, to be %d", count, len(keySlice))
 	}
 
 	defer objs.Close()
