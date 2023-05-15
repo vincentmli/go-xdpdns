@@ -175,7 +175,7 @@ func main() {
 
 	}
 
-	defer objs.Close()
+	//defer objs.Close()
 
 	// Attach the program.
 	l, err := link.AttachXDP(link.XDPOptions{
