@@ -1,7 +1,23 @@
 /*
- * DNS Response Rate Limiting module in XDP.
+ * Copyright (c) 2021, NLnet Labs. All rights reserved.
  *
- * October 2020 - Tom Carpay & Willem Toorop
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#define COOKIE_SECRET 00112233445566778899AABBCCDDEEFF
+/* The secret with which to verify the validity of DNS Cookies.
+ * Requests with valid DNS Cookies will not be ratelimited.
  */
 
 #define RRL_N_CPUS            2
@@ -40,10 +56,11 @@
  * a +TC response.
  */
 
-
-/* #define COMPILE_FOR_OLD_LIBBPF */
-/* uncomment the above to compile for old versions of libbpf */
-
+#ifdef  DEBUG
+#define DEBUG_PRINTK(...) bpf_printk(__VA_ARGS__)
+#else
+#define DEBUG_PRINTK(...)
+#endif
 
 #include <linux/bpf.h>
 #include <linux/if_ether.h> /* for struct ethhdr   */
@@ -51,8 +68,8 @@
 #include <linux/ipv6.h>     /* for struct ipv6hdr  */
 #include <linux/in.h>       /* for IPPROTO_UDP     */
 #include <linux/udp.h>      /* for struct udphdr   */
-#include "bpf_helpers.h"    /* for bpf_get_prandom_u32() */
-#include "bpf_endian.h"     /* for __bpf_htons()   */
+#include "bpf_helpers.h"
+#include "bpf_endian.h"
 
 // do not use libc includes because this causes clang
 // to include 32bit headers on 64bit ( only ) systems.
@@ -62,19 +79,33 @@ typedef __u32 uint32_t;
 typedef __u64 uint64_t;
 #define memcpy __builtin_memcpy
 
-#define DNS_PORT             53
+#include "siphash4bpf.c"
 
-//#define THRESHOLD ((RRL_RATELIMIT) / (RRL_N_CPUS))
+struct bpf_map_def SEC("maps") jmp_table = {
+        .type = BPF_MAP_TYPE_PROG_ARRAY,
+        .key_size = sizeof(uint32_t),
+        .value_size = sizeof(uint32_t),
+        .max_entries = 5
+};
+
+#define DO_RATE_LIMIT_IPV6 0
+#define DO_RATE_LIMIT_IPV4 1
+#define COOKIE_VERIFY_IPv6 2
+#define COOKIE_VERIFY_IPv4 3
+
+struct meta_data {
+	uint16_t eth_proto;
+	uint16_t ip_pos;
+	uint16_t opt_pos;
+	uint16_t unused;
+};
+
+#define DNS_PORT        53
+#define RR_TYPE_OPT     41
+#define OPT_CODE_COOKIE 10
+
+#define THRESHOLD ((RRL_RATELIMIT) / (RRL_N_CPUS))
 #define FRAME_SIZE   1000000000
-
-struct config {
-        uint16_t ratelimit;
-	uint8_t numcpus;
-} __attribute__((packed));
-
-static volatile const struct config CFG;
-#define cfg (&CFG)
-
 
 #define RRL_MASK_CONCAT1(X)  RRL_MASK ## X
 #define RRL_MASK_CONCAT2(X)  RRL_MASK_CONCAT1(X)
@@ -148,7 +179,6 @@ static volatile const struct config CFG;
 #else
 # error "Fix your compiler's __BYTE_ORDER__?!"
 #endif
-
 #define RRL_MASK33           RRL_MASK1
 #define RRL_MASK34           RRL_MASK2
 #define RRL_MASK35           RRL_MASK3
@@ -180,7 +210,6 @@ static volatile const struct config CFG;
 #define RRL_MASK61           RRL_MASK29
 #define RRL_MASK62           RRL_MASK30
 #define RRL_MASK63           RRL_MASK31
-
 #define RRL_MASK65           RRL_MASK1
 #define RRL_MASK66           RRL_MASK2
 #define RRL_MASK67           RRL_MASK3
@@ -212,7 +241,6 @@ static volatile const struct config CFG;
 #define RRL_MASK93           RRL_MASK29
 #define RRL_MASK94           RRL_MASK30
 #define RRL_MASK95           RRL_MASK31
-
 #define RRL_MASK97           RRL_MASK1
 #define RRL_MASK98           RRL_MASK2
 #define RRL_MASK99           RRL_MASK3
@@ -245,73 +273,21 @@ static volatile const struct config CFG;
 #define RRL_MASK126          RRL_MASK30
 #define RRL_MASK127          RRL_MASK31
 
-#ifndef __section
-# define __section(NAME) __attribute__((section(NAME), used))
-#endif
-#ifndef __uint
-# define __uint(name, val) int(*(name))[val]
-#endif
-#ifndef __type
-#define __type(name, val) typeof(val) *(name)
-#endif
-
-
-#ifdef COMPILE_FOR_OLD_LIBBPF
-
 struct bpf_map_def SEC("maps") exclude_v4_prefixes = {
 	.type = BPF_MAP_TYPE_LPM_TRIE,
 	.key_size = sizeof(struct bpf_lpm_trie_key) + sizeof(uint32_t),
 	.value_size = sizeof(uint64_t),
-	.max_entries = 10000
+	.max_entries = 10000,
+	.map_flags = BPF_F_NO_PREALLOC
 };
 
 struct bpf_map_def SEC("maps") exclude_v6_prefixes = {
 	.type = BPF_MAP_TYPE_LPM_TRIE,
 	.key_size = sizeof(struct bpf_lpm_trie_key) + 8, // first 64 bits
 	.value_size = sizeof(uint64_t),
-	.max_entries = 10000
+	.max_entries = 10000,
+	.map_flags = BPF_F_NO_PREALLOC
 };
-
-#else /* #ifdef COMPILE_FOR_OLD_LIBBPF */
-
-struct ipv4_key {
-	struct   bpf_lpm_trie_key lpm_key;
-	uint8_t  ipv4[4];
-};
-
-struct {
-	__uint(type,  BPF_MAP_TYPE_LPM_TRIE);
-	__type(key,   struct ipv4_key);
-	__type(value, uint64_t);
-	__uint(max_entries, 10000);
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} exclude_v4_prefixes __section(".maps");
-
-struct ipv6_key {
-	struct   bpf_lpm_trie_key lpm_key;
-	uint64_t ipv6;
-} __attribute__((packed));
-
-struct {
-	__uint(type,  BPF_MAP_TYPE_LPM_TRIE);
-	__type(key,   struct ipv6_key);
-	__type(value, uint64_t);
-	__uint(max_entries, 10000);
-        __uint(pinning, LIBBPF_PIN_BY_NAME);
-        __uint(map_flags, BPF_F_NO_PREALLOC);
-} exclude_v6_prefixes __section(".maps");
-
-#endif /* #else #ifdef COMPILE_FOR_OLD_LIBBPF */
-
-SEC("xdp-rrl")
-#if RRL_RATELIMIT == 0
-int xdp_rrl(struct xdp_md *ctx)
-{
-	(void)ctx;
-	return XDP_PASS;
-}
-#else
 
 /*
  *  Store the time frame
@@ -321,7 +297,6 @@ struct bucket {
 	uint64_t n_packets;
 };
 
-#ifdef COMPILE_FOR_OLD_LIBBPF
 struct bpf_map_def SEC("maps") state_map = {
 	.type = BPF_MAP_TYPE_PERCPU_HASH,
 	.key_size = sizeof(uint32_t),
@@ -335,21 +310,7 @@ struct bpf_map_def SEC("maps") state_map_v6 = {
 	.value_size = sizeof(struct bucket),
 	.max_entries = RRL_SIZE
 };
-#else /* #ifdef COMPILE_FOR_OLD_LIBBPF */
-struct {
-	__uint(type,  BPF_MAP_TYPE_PERCPU_HASH);
-	__type(key,   uint32_t);
-	__type(value, struct bucket);
-	__uint(max_entries, RRL_SIZE);
-} state_map __section(".maps");
 
-struct {
-	__uint(type,  BPF_MAP_TYPE_PERCPU_HASH);
-	__type(key,   sizeof(struct in6_addr));
-	__type(value, struct bucket);
-	__uint(max_entries, RRL_SIZE);
-} state_map_v6 __section(".maps");
-#endif /* #else #ifdef COMPILE_FOR_OLD_LIBBPF */
 
 /** Copied from the kernel module of the base03-map-counter example of the
  ** XDP Hands-On Tutorial (see https://github.com/xdp-project/xdp-tutorial )
@@ -396,6 +357,25 @@ struct dnshdr {
 	uint16_t arcount;
 };
 
+struct dns_qrr {
+        uint16_t qtype;
+        uint16_t qclass;
+};
+
+struct dns_rr {
+        uint16_t type;
+        uint16_t class;
+        uint32_t ttl;
+        uint16_t rdata_len;
+} __attribute__((packed));
+
+struct option {
+	uint16_t code;
+	uint16_t len;
+	uint8_t  data[];
+} __attribute__((packed));
+
+
 /*
  *  Helper pointer to parse the incoming packets
  */
@@ -404,10 +384,6 @@ struct cursor {
 	void *end;
 };
 
-
-/*
- *  Initializer of a cursor pointer
- */
 static __always_inline
 void cursor_init(struct cursor *c, struct xdp_md *ctx)
 {
@@ -416,7 +392,7 @@ void cursor_init(struct cursor *c, struct xdp_md *ctx)
 }
 
 #define PARSE_FUNC_DECLARATION(STRUCT)			\
-static __always_inline						\
+static __always_inline \
 struct STRUCT *parse_ ## STRUCT (struct cursor *c)	\
 {							\
 	struct STRUCT *ret = c->pos;			\
@@ -432,10 +408,10 @@ PARSE_FUNC_DECLARATION(iphdr)
 PARSE_FUNC_DECLARATION(ipv6hdr)
 PARSE_FUNC_DECLARATION(udphdr)
 PARSE_FUNC_DECLARATION(dnshdr)
+PARSE_FUNC_DECLARATION(dns_qrr)
+PARSE_FUNC_DECLARATION(dns_rr)
+PARSE_FUNC_DECLARATION(option)
 
-/*
- * Parse ethernet frame and fill the struct
- */
 static __always_inline
 struct ethhdr *parse_eth(struct cursor *c, uint16_t *eth_proto)
 {
@@ -462,6 +438,35 @@ struct ethhdr *parse_eth(struct cursor *c, uint16_t *eth_proto)
 		}
 	}
 	return eth;
+}
+
+static  inline
+uint8_t *skip_dname(struct cursor *c)
+{
+        uint8_t *dname = c->pos;
+	uint8_t i;
+
+        for (i = 0; i < 128; i++) { /* Maximum 128 labels */
+                uint8_t o;
+
+                if (c->pos + 1 > c->end)
+                        return 0;
+
+                o = *(uint8_t *)c->pos;
+                if ((o & 0xC0) == 0xC0) {
+                        /* Compression label is last label of dname. */
+                        c->pos += 2;
+                        return dname;
+
+                } else if (o > 63 || c->pos + o + 1 > c->end)
+                        /* Unknown label type */
+                        return 0;
+
+                c->pos += o + 1;
+                if (!o)
+                        return dname;
+        }
+        return 0;
 }
 
 /*
@@ -500,7 +505,7 @@ do_rate_limit(struct udphdr *udp, struct dnshdr *dns, struct bucket *b)
 		b->n_packets = 0;
 	}
 
-	if (b->n_packets < (cfg->ratelimit / cfg->numcpus))
+	if (b->n_packets < THRESHOLD)
 		return XDP_PASS;
 
 #if  RRL_SLIP == 0
@@ -510,7 +515,6 @@ do_rate_limit(struct udphdr *udp, struct dnshdr *dns, struct bucket *b)
 	if (b->n_packets % RRL_SLIP)
 		return XDP_DROP;
 # endif
-	//bpf_printk("bounce\n");
 	//save the old header values
 	uint16_t old_val = dns->flags.as_value;
 
@@ -531,108 +535,55 @@ do_rate_limit(struct udphdr *udp, struct dnshdr *dns, struct bucket *b)
 #endif
 }
 
-static __always_inline enum xdp_action
-udp_dns_reply_v4(struct cursor *c, uint32_t key)
+
+SEC("xdp-do-rate-limit-ipv6")
+int xdp_do_rate_limit_ipv6(struct xdp_md *ctx)
 {
-	struct udphdr  *udp;
-	struct dnshdr  *dns;
+	struct cursor     c;
+	struct meta_data *md = (void *)(long)ctx->data_meta;
+	struct ipv6hdr   *ipv6;
+	struct in6_addr   ipv6_addr;
+	struct udphdr    *udp;
+	struct dnshdr    *dns;
 
-	// check that we have a DNS packet
-	if (!(udp = parse_udphdr(c)) || udp->dest != __bpf_htons(DNS_PORT)
-	||  !(dns = parse_dnshdr(c)))
-		return XDP_PASS;
+	DEBUG_PRINTK("xdp_do_rate_limit_ipv6\n");
 
-	// search for the prefix in the LPM trie
+	cursor_init(&c, ctx);
+	if ((void *)(md + 1) > c.pos || md->ip_pos > 24)
+		return XDP_ABORTED;
+	c.pos += md->ip_pos;
 
-	struct ipv4_key key4;
-	key4.lpm_key.prefixlen = 32;
-	key4.ipv4[0]   = key & 0xff;
-	key4.ipv4[1]   = (key >> 8) & 0xff;
-	key4.ipv4[2]   = (key >> 16) & 0xff;
-	key4.ipv4[3]   = (key >> 24) & 0xff;
+	if (!(ipv6 = parse_ipv6hdr(&c)) || md->opt_pos > 4096
+	||  !(udp = parse_udphdr(&c)) || udp->dest != __bpf_htons(DNS_PORT)
+	||  !(dns = parse_dnshdr(&c)))
+		return XDP_ABORTED;
 
-	uint64_t *count = bpf_map_lookup_elem(&exclude_v4_prefixes, &key4);
-
-	// if the prefix matches, we exclude it from rate limiting
-	if (count) {
-		lock_xadd(count, 1);
-		return XDP_PASS;
-	}
-
-	// get the rrl bucket from the map by IPv4 address
-#if   RRL_IPv4_PREFIX_LEN == 32
-#elif RRL_IPv4_PREFIX_LEN ==  0
-	key =  0;
-#else
-	key &= RRL_IPv4_MASK;
-#endif
-	struct bucket *b = bpf_map_lookup_elem(&state_map, &key);
-
-	// did we see this IPv4 address before?
-	if (b)
-		return do_rate_limit(udp, dns, b);
-
-	// create new starting bucket for this key
-	struct bucket new_bucket;
-	new_bucket.start_time = bpf_ktime_get_ns();
-	new_bucket.n_packets = 0;
-
-	// store the bucket and pass the packet
-	bpf_map_update_elem(&state_map, &key, &new_bucket, BPF_ANY);
-	return XDP_PASS;
-}
-
-static __always_inline enum xdp_action
-udp_dns_reply_v6(struct cursor *c, struct in6_addr *key)
-{
- 	struct udphdr  *udp;
- 	struct dnshdr  *dns;
-
- 	// check that we have a DNS packet
- 	if (!(udp = parse_udphdr(c)) || udp->dest != __bpf_htons(DNS_PORT)
- 	||  !(dns = parse_dnshdr(c)))
- 		return XDP_PASS;
-
-	// search for the prefix in the LPM trie
-	struct {
-		uint32_t        prefixlen;
-		struct in6_addr ipv6_addr;
-	} key6 = {
-		.prefixlen = 64,
-		.ipv6_addr = *key
-	};
-	uint64_t *count = bpf_map_lookup_elem(&exclude_v6_prefixes, &key6);
-
-	// if the prefix is matches, we exclude it from rate limiting
-	if (count) {
-		lock_xadd(count, 1);
-		return XDP_PASS;
-	}
+	ipv6_addr = ipv6->saddr;
  	// get the rrl bucket from the map by IPv6 address
 #if     RRL_IPv6_PREFIX_LEN == 128
 #elif   RRL_IPv6_PREFIX_LEN >   96
-	key6.ipv6_addr.in6_u.u6_addr32[3] &= RRL_IPv6_MASK;
+	ipv6_addr.in6_u.u6_addr32[3] &= RRL_IPv6_MASK;
 #else
-	key6.ipv6_addr.in6_u.u6_addr32[3] = 0;
+	ipv6_addr.in6_u.u6_addr32[3] = 0;
 # if    RRL_IPv6_PREFIX_LEN ==  96
 # elif  RRL_IPv6_PREFIX_LEN >   64
-	key6.ipv6_addr.in6_u.u6_addr32[2] &= RRL_IPv6_MASK;
+	ipv6_addr.in6_u.u6_addr32[2] &= RRL_IPv6_MASK;
 # else
-	key6.ipv6_addr.in6_u.u6_addr32[2] = 0;
+	ipv6_addr.in6_u.u6_addr32[2] = 0;
 #  if   RRL_IPv6_PREFIX_LEN ==  64
 #  elif RRL_IPv6_PREFIX_LEN >   32
-	key6.ipv6_addr.in6_u.u6_addr32[1] &= RRL_IPv6_MASK;
+	ipv6_addr.in6_u.u6_addr32[1] &= RRL_IPv6_MASK;
 #  else
-	key6.ipv6_addr.in6_u.u6_addr32[1] = 0;
+	ipv6_addr.in6_u.u6_addr32[1] = 0;
 #   if  RRL_IPv6_PREFIX_LEN ==   0
-	key6.ipv6_addr.in6_u.u6_addr32[0] = 0;
+	ipv6_addr.in6_u.u6_addr32[0] = 0;
 #   elif RRL_IPv6_PREFIX_LEN <  32
-	key6.ipv6_addr.in6_u.u6_addr32[0] &= RRL_IPv6_MASK;
+	ipv6_addr.in6_u.u6_addr32[0] &= RRL_IPv6_MASK;
 #   endif
 #  endif
 # endif
 #endif
- 	struct bucket *b = bpf_map_lookup_elem(&state_map_v6, &key6.ipv6_addr);
+ 	struct bucket *b = bpf_map_lookup_elem(&state_map_v6, &ipv6_addr);
 
  	// did we see this IPv6 address before?
 	if (b)
@@ -644,55 +595,307 @@ udp_dns_reply_v6(struct cursor *c, struct in6_addr *key)
 	new_bucket.n_packets = 0;
 
 	// store the bucket and pass the packet
-	bpf_map_update_elem(&state_map_v6, &key6.ipv6_addr, &new_bucket, BPF_ANY);
+	bpf_map_update_elem(&state_map_v6, &ipv6_addr, &new_bucket, BPF_ANY);
+	return XDP_PASS;
+}
+
+SEC("xdp-do-rate-limit-ipv4")
+int xdp_do_rate_limit_ipv4(struct xdp_md *ctx)
+{
+	struct cursor     c;
+	struct meta_data *md = (void *)(long)ctx->data_meta;
+	struct iphdr     *ipv4;
+	uint32_t          ipv4_addr;
+	struct udphdr    *udp;
+	struct dnshdr    *dns;
+
+	DEBUG_PRINTK("xdp_do_rate_limit_ipv4\n");
+
+	cursor_init(&c, ctx);
+	if ((void *)(md + 1) > c.pos || md->ip_pos > 24)
+		return XDP_ABORTED;
+	c.pos += md->ip_pos;
+
+	if (!(ipv4 = parse_iphdr(&c)) || md->opt_pos > 4096
+	||  !(udp = parse_udphdr(&c)) || udp->dest != __bpf_htons(DNS_PORT)
+	||  !(dns = parse_dnshdr(&c)))
+		return XDP_ABORTED;
+
+	// get the rrl bucket from the map by IPv4 address
+#if   RRL_IPv4_PREFIX_LEN == 32
+#elif RRL_IPv4_PREFIX_LEN ==  0
+	ipv4_addr = 0;
+#else
+	ipv4_addr = ipv4->saddr & RRL_IPv4_MASK;
+#endif
+	struct bucket *b = bpf_map_lookup_elem(&state_map, &ipv4_addr);
+
+	// did we see this IPv4 address before?
+	if (b)
+		return do_rate_limit(udp, dns, b);
+
+	// create new starting bucket for this key
+	struct bucket new_bucket;
+	new_bucket.start_time = bpf_ktime_get_ns();
+	new_bucket.n_packets = 0;
+
+	// store the bucket and pass the packet
+	bpf_map_update_elem(&state_map, &ipv4_addr, &new_bucket, BPF_ANY);
+	return XDP_PASS;
+}
+
+static __always_inline
+int cookie_verify_ipv6(struct cursor *c, struct ipv6hdr *ipv6)
+{
+	uint8_t  input[32];
+	uint64_t hash;
+
+	memcpy(input, c->pos, 16);
+	memcpy(input + 16, &ipv6->saddr, 16);
+	siphash_ipv6(input, (uint8_t *)&hash);
+	return hash == ((uint64_t *)c->pos)[2];
+}
+
+SEC("xdp-cookie-verify-ipv6")
+int xdp_cookie_verify_ipv6(struct xdp_md *ctx)
+{
+	struct cursor     c;
+	struct meta_data *md = (void *)(long)ctx->data_meta;
+	struct ipv6hdr   *ipv6;
+	struct dns_rr    *opt_rr;
+	uint16_t          rdata_len;
+	uint8_t           i;
+
+	cursor_init(&c, ctx);
+	if ((void *)(md + 1) > c.pos || md->ip_pos > 24)
+		return XDP_ABORTED;
+	c.pos += md->ip_pos;
+
+	if (!(ipv6 = parse_ipv6hdr(&c)) || md->opt_pos > 4096)
+		return XDP_ABORTED;
+	c.pos += md->opt_pos;
+
+	if (!(opt_rr = parse_dns_rr(&c))
+	||    opt_rr->type != __bpf_htons(RR_TYPE_OPT))
+		return XDP_ABORTED;
+
+	rdata_len = __bpf_ntohs(opt_rr->rdata_len);
+	for (i = 0; i < 10 && rdata_len >= 28; i++) {
+		struct option *opt;
+		uint16_t       opt_len;
+
+		if (!(opt = parse_option(&c)))
+			return XDP_ABORTED;
+
+		rdata_len -= 4;
+		opt_len = __bpf_ntohs(opt->len);
+		if (opt->code == __bpf_htons(OPT_CODE_COOKIE)) {
+			if (opt_len == 24 && c.pos + 24 <= c.end
+			&&  cookie_verify_ipv6(&c, ipv6)) {
+				/* Cookie match!
+				 * Packet may go staight up to the DNS service
+				 */
+				DEBUG_PRINTK("IPv6 valid cookie\n");
+				return XDP_PASS;
+			}
+			/* Just a client cookie or a bad cookie
+			 * break to go to rate limiting
+			 */
+			DEBUG_PRINTK("IPv6 bad cookie\n");
+			break;
+		}
+		if (opt_len > 1500 || opt_len > rdata_len
+		||  c.pos + opt_len > c.end)
+			return XDP_ABORTED;
+
+		rdata_len -= opt_len;
+		c.pos += opt_len;
+	}
+	bpf_tail_call(ctx, &jmp_table, DO_RATE_LIMIT_IPV6);
 	return XDP_PASS;
 }
 
 
-SEC("xdp-rrl")
-int xdp_rrl(struct xdp_md *ctx)
+static __always_inline
+int cookie_verify_ipv4(struct cursor *c, struct iphdr *ipv4)
 {
-	struct cursor   c;
-	struct ethhdr  *eth;
-	uint16_t        eth_proto;
-	struct iphdr   *ipv4;
-	struct ipv6hdr *ipv6;
-	enum xdp_action r = XDP_PASS;
+	uint8_t  input[20];
+	uint64_t hash;
+
+	memcpy(input, c->pos, 16);
+	memcpy(input + 16, &ipv4->saddr, 4);
+	siphash_ipv4(input, (uint8_t *)&hash);
+	return hash == ((uint64_t *)c->pos)[2];
+}
+
+SEC("xdp-cookie-verify-ipv4")
+int xdp_cookie_verify_ipv4(struct xdp_md *ctx)
+{
+	struct cursor     c;
+	struct meta_data *md = (void *)(long)ctx->data_meta;
+	struct iphdr     *ipv4;
+	struct dns_rr    *opt_rr;
+	uint16_t          rdata_len;
+	uint8_t           i;
 
 	cursor_init(&c, ctx);
-	if (!(eth = parse_eth(&c, &eth_proto)))
-		return XDP_PASS;
+	if ((void *)(md + 1) > c.pos || md->ip_pos > 24)
+		return XDP_ABORTED;
+	c.pos += md->ip_pos;
 
-	if (eth_proto == __bpf_htons(ETH_P_IP)) {
-		if (!(ipv4 = parse_iphdr(&c))
-		||    ipv4->protocol != IPPROTO_UDP
-		||   (r = udp_dns_reply_v4(&c, ipv4->saddr)) != XDP_TX)
-			return r;
+	if (!(ipv4 = parse_iphdr(&c)) || md->opt_pos > 4096)
+		return XDP_ABORTED;
+	c.pos += md->opt_pos;
 
-		uint32_t swap_ipv4 = ipv4->daddr;
-		ipv4->daddr = ipv4->saddr;
-		ipv4->saddr = swap_ipv4;
+	if (!(opt_rr = parse_dns_rr(&c))
+	||    opt_rr->type != __bpf_htons(RR_TYPE_OPT))
+		return XDP_ABORTED;
 
-	} else if (eth_proto == __bpf_htons(ETH_P_IPV6)) {
-		if (!(ipv6 = parse_ipv6hdr(&c))
-		||    ipv6->nexthdr  != IPPROTO_UDP
-		||   (r = udp_dns_reply_v6(&c, &ipv6->saddr)) != XDP_TX)
-			return r;
+	rdata_len = __bpf_ntohs(opt_rr->rdata_len);
+	for (i = 0; i < 10 && rdata_len >= 28; i++) {
+		struct option *opt;
+		uint16_t       opt_len;
 
-		struct in6_addr swap_ipv6 = ipv6->daddr;
-		ipv6->daddr = ipv6->saddr;
-		ipv6->saddr = swap_ipv6;
-	} else
-		return XDP_PASS;
+		if (!(opt = parse_option(&c)))
+			return XDP_ABORTED;
 
-	uint8_t swap_eth[ETH_ALEN];
-	memcpy(swap_eth, eth->h_dest, ETH_ALEN);
-	memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
-	memcpy(eth->h_source, swap_eth, ETH_ALEN);
+		rdata_len -= 4;
+		opt_len = __bpf_ntohs(opt->len);
+		if (opt->code == __bpf_htons(OPT_CODE_COOKIE)) {
+			if (opt_len == 24 && c.pos + 24 <= c.end
+			&&  cookie_verify_ipv4(&c, ipv4)) {
+				/* Cookie match!
+				 * Packet may go staight up to the DNS service
+				 */
+				DEBUG_PRINTK("IPv4 valid cookie\n");
+				return XDP_PASS;
+			}
+			/* Just a client cookie or a bad cookie
+			 * break to go to rate limiting
+			 */
+			DEBUG_PRINTK("IPv4 bad cookie\n");
+			break;
+		}
+		if (opt_len > 1500 || opt_len > rdata_len
+		||  c.pos + opt_len > c.end)
+			return XDP_ABORTED;
 
-	// bounce the request
-	return XDP_TX;
+		rdata_len -= opt_len;
+		c.pos += opt_len;
+	}
+	bpf_tail_call(ctx, &jmp_table, DO_RATE_LIMIT_IPV4);
+	return XDP_PASS;
 }
-#endif /* #if RRL_RATELIMIT == 0 */
 
-char __license[] SEC("license") = "GPL";
+
+SEC("xdp-dns-cookies")
+int xdp_dns_cookies(struct xdp_md *ctx)
+{
+	struct meta_data *md = (void *)(long)ctx->data_meta;
+	struct cursor     c;
+	struct ethhdr    *eth;
+	struct ipv6hdr   *ipv6;
+	struct iphdr     *ipv4;
+	struct udphdr    *udp;
+	struct dnshdr    *dns;
+	uint64_t         *count;
+
+	if (bpf_xdp_adjust_meta(ctx, -(int)sizeof(struct meta_data)))
+		return XDP_PASS;
+
+	cursor_init(&c, ctx);
+	md = (void *)(long)ctx->data_meta;
+	if ((void *)(md + 1) > c.pos)
+		return XDP_PASS;
+
+	if (!(eth = parse_eth(&c, &md->eth_proto)))
+		return XDP_PASS;
+	md->ip_pos = c.pos - (void *)eth;
+
+	if (md->eth_proto == __bpf_htons(ETH_P_IPV6)) {
+		if (!(ipv6 = parse_ipv6hdr(&c))
+		||  !(ipv6->nexthdr == IPPROTO_UDP)
+	 	||  !(udp = parse_udphdr(&c))
+		||  !(udp->dest == __bpf_htons(DNS_PORT))
+	 	||  !(dns = parse_dnshdr(&c)))
+	 		return XDP_PASS; /* Not DNS */
+
+		// search for the prefix in the LPM trie
+		struct {
+			uint32_t        prefixlen;
+			struct in6_addr ipv6_addr;
+		} key6 = {
+			.prefixlen = 64,
+			.ipv6_addr = ipv6->daddr
+		};
+		// if the prefix matches, we exclude it from rate limiting
+		if ((count=bpf_map_lookup_elem(&exclude_v6_prefixes, &key6))) {
+			lock_xadd(count, 1);
+			return XDP_PASS;
+		}
+		if (dns->flags.as_bits_and_pieces.qr
+		||  dns->qdcount != __bpf_htons(1)
+		||  dns->ancount || dns->nscount
+		||  dns->arcount >  __bpf_htons(2)
+		||  !skip_dname(&c)
+		||  !parse_dns_qrr(&c))
+			return XDP_ABORTED; // Return FORMERR?
+
+		if (dns->arcount == 0) {
+			bpf_tail_call(ctx, &jmp_table, DO_RATE_LIMIT_IPV6);
+			return XDP_PASS;
+		}
+		if (c.pos + 1 > c.end
+		||  *(uint8_t *)c.pos != 0)
+			return XDP_ABORTED; // Return FORMERR?
+
+		md->opt_pos = c.pos + 1 - (void *)(ipv6 + 1);
+		bpf_tail_call(ctx, &jmp_table, COOKIE_VERIFY_IPv6);
+		
+	} else if (md->eth_proto == __bpf_htons(ETH_P_IP)) {
+		if (!(ipv4 = parse_iphdr(&c))
+		||  !(ipv4->protocol == IPPROTO_UDP)
+	 	||  !(udp = parse_udphdr(&c))
+		||  !(udp->dest == __bpf_htons(DNS_PORT))
+	 	||  !(dns = parse_dnshdr(&c)))
+	 		return XDP_PASS; /* Not DNS */
+	 		
+		// search for the prefix in the LPM trie
+		struct {
+			uint32_t prefixlen;
+			uint32_t ipv4_addr;
+		} key4 = {
+			.prefixlen = 32,
+			.ipv4_addr = ipv4->saddr
+		};
+
+		// if the prefix matches, we exclude it from rate limiting
+		if ((count=bpf_map_lookup_elem(&exclude_v4_prefixes, &key4))) {
+			lock_xadd(count, 1);
+			return XDP_PASS;
+		}
+
+		if (dns->flags.as_bits_and_pieces.qr
+		||  dns->qdcount != __bpf_htons(1)
+		||  dns->ancount || dns->nscount
+		||  dns->arcount >  __bpf_htons(2)
+		||  !skip_dname(&c)
+		||  !parse_dns_qrr(&c))
+			return XDP_ABORTED; // return FORMERR?
+
+		if (dns->arcount == 0) {
+			bpf_tail_call(ctx, &jmp_table, DO_RATE_LIMIT_IPV4);
+			return XDP_PASS;
+		}
+		if (c.pos + 1 > c.end
+		||  *(uint8_t *)c.pos != 0)
+			return XDP_ABORTED; // Return FORMERR?
+
+		md->opt_pos = c.pos + 1 - (void *)(ipv4 + 1);
+		bpf_tail_call(ctx, &jmp_table, COOKIE_VERIFY_IPv4);
+	}
+	return XDP_PASS;
+}
+
+char _license[] SEC("license") = "GPL";
+
