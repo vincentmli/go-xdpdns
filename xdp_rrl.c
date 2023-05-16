@@ -107,8 +107,16 @@ struct meta_data {
 #define RR_TYPE_OPT     41
 #define OPT_CODE_COOKIE 10
 
-#define THRESHOLD ((RRL_RATELIMIT) / (RRL_N_CPUS))
+//#define THRESHOLD ((RRL_RATELIMIT) / (RRL_N_CPUS))
 #define FRAME_SIZE   1000000000
+
+struct config {
+        uint16_t ratelimit;
+	uint8_t numcpus;
+} __attribute__((packed));
+
+static volatile const struct config CFG;
+#define cfg (&CFG)
 
 #define RRL_MASK_CONCAT1(X)  RRL_MASK ## X
 #define RRL_MASK_CONCAT2(X)  RRL_MASK_CONCAT1(X)
@@ -519,7 +527,7 @@ do_rate_limit(struct udphdr *udp, struct dnshdr *dns, struct bucket *b)
 		b->n_packets = 0;
 	}
 
-	if (b->n_packets < THRESHOLD)
+	if (b->n_packets < (cfg->ratelimit / cfg->numcpus))
 		return XDP_PASS;
 
 #if  RRL_SLIP == 0

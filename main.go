@@ -179,7 +179,7 @@ func main() {
 
 	// Attach the program.
 	l, err := link.AttachXDP(link.XDPOptions{
-		Program:   objs.XdpRrl,
+		Program:   objs.XdpDnsCookies,
 		Interface: iface.Index,
 	})
 	if err != nil {
