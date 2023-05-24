@@ -175,7 +175,7 @@ func main() {
 
 	}
 
-	//defer objs.Close()
+	defer objs.Close()
 
 	// Attach the program.
 	l, err := link.AttachXDP(link.XDPOptions{
@@ -189,7 +189,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("could not pin XDP program: %s", err)
 	}
-	//	defer l.Close()
+	defer l.Close()
 
 	log.Printf("Attached XDP program to iface %q (index %d)", iface.Name, iface.Index)
 

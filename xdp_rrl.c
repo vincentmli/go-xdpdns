@@ -670,6 +670,7 @@ struct {
         __uint(max_entries, 3);
         __uint(key_size, sizeof(uint32_t));
         __uint(value_size, sizeof(uint32_t));
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
         __array(values, int (void *));
 } jmp_rate_table SEC(".maps") = {
         .values = {
@@ -826,6 +827,7 @@ struct {
         __uint(max_entries, 3);
         __uint(key_size, sizeof(uint32_t));
         __uint(value_size, sizeof(uint32_t));
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
         __array(values, int (void *));
 } jmp_cookie_table SEC(".maps") = {
         .values = {
